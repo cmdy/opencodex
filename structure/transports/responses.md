@@ -332,6 +332,9 @@ turn and the item outlives the failure in the client transcript, repeating on ev
 including the compaction turn the proxy itself drives. With `store: false`, request sanitization
 strips ids from every input item, including compact-wire items, matching codex-rs
 (`core/src/client.rs:918-925`). Compact-wire items remain exempt from response-side field backfill.
+If LiteLLM wraps an upstream OpenAI error as prose in its outer `error.message`, reactive recovery
+parses only the bounded `OpenAIException - {JSON}` payload and applies the existing recognized
+opaque-rejection identities to that inner payload; other LiteLLM 400 responses do not retry.
 
 For replayed `encrypted_content` slots whose minting provenance is unavailable after a restart or
 full-history resend, the plaintext-compatibility boundary requires canonical key-independent Fernet

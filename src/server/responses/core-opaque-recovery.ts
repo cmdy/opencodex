@@ -116,6 +116,80 @@ export function isReasoningBlobCallerMismatchMessage(message: string): boolean {
 }
 
 
+function liteLlmEmbeddedErrorPayload(message: string): unknown {
+  if (!message.startsWith("litellm.BadRequestError:")) return undefined;
+  const marker = "OpenAIException - ";
+  const markerIndex = message.indexOf(marker);
+  if (markerIndex < 0) return undefined;
+  const start = message.indexOf("{", markerIndex + marker.length);
+  if (start < 0) return undefined;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < message.length; index += 1) {
+    const character = message[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') { inString = true; continue; }
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try { return JSON.parse(message.slice(start, index + 1)) as unknown; } catch { return undefined; }
+      }
+    }
+  }
+  return undefined;
+}
+
+
+function isOpaqueBlobErrorPayload(payload: unknown, allowLiteLlmWrapper: boolean): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const record = payload as { code?: unknown; type?: unknown; message?: unknown; error?: unknown };
+
+  if (record.error && typeof record.error === "object" && !Array.isArray(record.error)) {
+    const error = record.error as { type?: unknown; code?: unknown; message?: unknown };
+    if (error.type === "invalid_request_error") {
+      if (error.code === "invalid_encrypted_content") return true;
+      if (
+        (error.code === null || error.code === undefined)
+        && typeof error.message === "string"
+        && error.message.startsWith("The encrypted content ")
+        && error.message.endsWith(
+          " could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+        )
+      ) return true;
+      // #4469: the caller-mismatch wording arrives without a dedicated code, so the
+      // message itself is the identity. It is not gated on code being null — the upstream
+      // may attach a generic code — because the anchored phrase is already specific.
+      if (typeof error.message === "string" && isReasoningBlobCallerMismatchMessage(error.message)) {
+        return true;
+      }
+    }
+    if (allowLiteLlmWrapper && typeof error.message === "string") {
+      return isOpaqueBlobErrorPayload(liteLlmEmbeddedErrorPayload(error.message), false);
+    }
+  }
+
+  // The flat stream-error envelope carries type/message at the top level rather than under
+  // an error object; the same anchored identity applies there.
+  if (
+    record.type === "invalid_request_error"
+    && typeof record.message === "string"
+    && isReasoningBlobCallerMismatchMessage(record.message)
+  ) return true;
+
+  if (record.code !== "invalid-argument" || typeof record.error !== "string") return false;
+  return record.error.startsWith("Could not decode the compaction blob")
+    || record.error.startsWith("Could not decrypt the provided encrypted_content");
+}
+
+
 export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
   if (isEncryptedFunctionOutputRejection(bodyText)) return true;
   try {
@@ -127,41 +201,7 @@ export function isSelfIdentifiedOpaqueBlobRejection(bodyText: string): boolean {
   }
   try {
     const payload = JSON.parse(bodyText) as unknown;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-    const record = payload as { code?: unknown; type?: unknown; message?: unknown; error?: unknown };
-
-    if (record.error && typeof record.error === "object" && !Array.isArray(record.error)) {
-      const error = record.error as { type?: unknown; code?: unknown; message?: unknown };
-      if (error.type === "invalid_request_error") {
-        if (error.code === "invalid_encrypted_content") return true;
-        if (
-          (error.code === null || error.code === undefined)
-          && typeof error.message === "string"
-          && error.message.startsWith("The encrypted content ")
-          && error.message.endsWith(
-            " could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
-          )
-        ) return true;
-        // #4469: the caller-mismatch wording arrives without a dedicated code, so the
-        // message itself is the identity. It is not gated on code being null — the upstream
-        // may attach a generic code — because the anchored phrase is already specific.
-        if (typeof error.message === "string" && isReasoningBlobCallerMismatchMessage(error.message)) {
-          return true;
-        }
-      }
-    }
-
-    // The flat stream-error envelope carries type/message at the top level rather than under
-    // an error object; the same anchored identity applies there.
-    if (
-      record.type === "invalid_request_error"
-      && typeof record.message === "string"
-      && isReasoningBlobCallerMismatchMessage(record.message)
-    ) return true;
-
-    if (record.code !== "invalid-argument" || typeof record.error !== "string") return false;
-    return record.error.startsWith("Could not decode the compaction blob")
-      || record.error.startsWith("Could not decrypt the provided encrypted_content");
+    return isOpaqueBlobErrorPayload(payload, true);
   } catch {
     return false;
   }

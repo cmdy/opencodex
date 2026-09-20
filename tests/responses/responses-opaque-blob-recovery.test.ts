@@ -38,6 +38,15 @@ const OPENAI_BLOB_ERROR = JSON.stringify({
     code: "invalid_encrypted_content",
   },
 });
+const LITELLM_BLOB_ERROR = JSON.stringify({
+  error: {
+    message: "litellm.BadRequestError: OpenAIException - " + OPENAI_BLOB_ERROR
+      + " This error occurs when load balancing Responses API across deployments with different API keys.",
+    type: "invalid_request_error",
+    param: null,
+    code: "400",
+  },
+});
 const CHATGPT_UNVERIFIABLE_BLOB_ERROR = JSON.stringify({
   error: {
     message: "The encrypted content 6871-test-ef-0 could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
@@ -430,8 +439,9 @@ describe("opaque blob recovery trigger", () => {
     alreadyAttempted: false,
   };
 
-  test("accepts OpenAI and both xAI opaque-state rejection identities", () => {
+  test("accepts OpenAI, LiteLLM-wrapped OpenAI, and both xAI rejection identities", () => {
     expect(shouldAttemptOpaqueBlobRecovery(base)).toBe(true);
+    expect(shouldAttemptOpaqueBlobRecovery({ ...base, errorBody: LITELLM_BLOB_ERROR })).toBe(true);
     expect(shouldAttemptOpaqueBlobRecovery({
       ...base,
       errorBody: CHATGPT_UNVERIFIABLE_BLOB_ERROR,
@@ -445,6 +455,18 @@ describe("opaque blob recovery trigger", () => {
       ...base,
       errorBody: JSON.stringify({
         error: { type: "invalid_request_error", code: "unknown_parameter", message: "Unknown parameter" },
+      }),
+    })).toBe(false);
+    expect(shouldAttemptOpaqueBlobRecovery({
+      ...base,
+      errorBody: JSON.stringify({
+        error: {
+          type: "invalid_request_error",
+          code: "400",
+          message: "litellm.BadRequestError: OpenAIException - " + JSON.stringify({
+            error: { type: "invalid_request_error", code: "unknown_parameter", message: "Unknown parameter" },
+          }),
+        },
       }),
     })).toBe(false);
     expect(shouldAttemptOpaqueBlobRecovery({ ...base, status: 500 })).toBe(false);
@@ -594,6 +616,25 @@ describe("opaque blob recovery through /v1/responses", () => {
       role: "user",
       content: [{ type: "input_text", text: FERNET_SHAPED_PLAINTEXT }],
     }]);
+  });
+
+  test("recovers LiteLLM-wrapped invalid encrypted content with one sanitized resend", async () => {
+    const outbound: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      outbound.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return outbound.length === 1 ? rejection(LITELLM_BLOB_ERROR) : success("resp-litellm-recovered");
+    }) as typeof fetch;
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+
+    const response = await handleResponses(request(), config(), logCtx);
+    expect(response.status).toBe(200);
+    await response.text();
+
+    expect(outbound).toHaveLength(2);
+    expect(hasBlob(outbound[0]!)).toBe(true);
+    expect(hasBlob(outbound[1]!)).toBe(false);
+    expect(logCtx.activeAttempt?.sendCount).toBe(2);
+    expect(logCtx.activeAttempt?.recoveryKinds).toEqual(["opaque-blob-rejection"]);
   });
 
   test("recovers a zero-output streamed function-output decrypt failure before client relay", async () => {
