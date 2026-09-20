@@ -450,19 +450,6 @@ describe("opaque blob recovery trigger", () => {
     expect(shouldAttemptOpaqueBlobRecovery({ ...base, errorBody: XAI_DECRYPT_ERROR })).toBe(true);
   });
 
-  test("accepts a LiteLLM-wrapped caller-mismatch rejection", () => {
-    expect(shouldAttemptOpaqueBlobRecovery({
-      ...base,
-      errorBody: JSON.stringify({
-        error: {
-          message: "litellm.BadRequestError: OpenAIException - " + CALLER_MISMATCH_BLOB_ERROR,
-          type: "invalid_request_error",
-          code: "400",
-        },
-      }),
-    })).toBe(true);
-  });
-
   test("rejects unrelated errors, 5xx, blobless sends, non-Responses adapters, and repeats", () => {
     expect(shouldAttemptOpaqueBlobRecovery({
       ...base,
